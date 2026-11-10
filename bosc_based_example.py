@@ -1,5 +1,5 @@
 from burst_detection.io_utils import load_mat_file
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from burst_detection.enums import BoscType, FrequencyBand, TFRMethod
 from burst_detection.bosc import Bosc
 
@@ -18,4 +18,4 @@ if __name__ == "__main__":
         frequency_band=(1, 50),
         freq_to_exclude=[(8, 15)]
     )
-    bosc.plot_bursts(range=(66500, 68500), show=True, colorbar=False)
+    bosc.plot_bursts(data_range=(66500, 68500), show=True, colorbar=False)

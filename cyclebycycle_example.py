@@ -20,4 +20,4 @@ if __name__ == "__main__":
     signal = signal[66000:70_000]  # Select a specific segment of the data for analysis
     cycle_by_cycle_detector = CycleByCycleDetection(frequency_band=FrequencyBand.BETA)
     cycle_by_cycle_detector.detect_bursts(signal, fs, config)
-    cycle_by_cycle_detector.plot_bursts(range=(500, 2500), show=True)
+    cycle_by_cycle_detector.plot_bursts(data_range=(500, 2500), show=True)

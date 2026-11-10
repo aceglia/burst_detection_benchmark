@@ -51,40 +51,56 @@ def compute_tfr(
         data = data[np.newaxis, :, :]
     if np.ndim(data) != 3:
         raise ValueError("Input data must be 1D, 2D, or 3D array.")
+    frequencies = np.linspace(fmin, fmax + 1, int((fmax - fmin)) + 1) if frequency_vector is None else frequency_vector
 
-    if method == TFRMethod.MORLET:
-        frequencies = (
-            np.linspace(fmin, fmax + 1, int((fmax - fmin) / 0.25) + 1) if frequency_vector is None else frequency_vector
+    do_loop = (
+        True
+        if method == TFRMethod.SUPERLET or normalization_method == "papto" or normalization_method == "stppto"
+        else False
+    )
+    if do_loop:
+        tfr = np.zeros((data.shape[0], data.shape[1], len(frequencies), data.shape[2]))
+        for i in range(data.shape[0]):
+            for j in range(data.shape[1]):
+                tfr[i, j, :, :] = _compute_tfr(
+                    data[i, j, :],
+                    fs,
+                    frequencies,
+                    method,
+                    n_cycles,
+                    superlet_order,
+                    normalization_method,
+                    **normalization_kwargs,
+                )
+    else:
+        tfr = _compute_tfr(
+            data, fs, frequencies, method, n_cycles, superlet_order, normalization_method, **normalization_kwargs
         )
+    return tfr
+
+
+def _compute_tfr(data, fs, frequencies, method, n_cycles, superlet_order, normalization_method, **normalization_kwargs):
+    if method == TFRMethod.MORLET:
         tfr = mne.time_frequency.tfr_array_morlet(
             data, sfreq=fs, freqs=frequencies, n_cycles=n_cycles, output="complex"
         )
         tfr = np.abs(tfr) ** 2  # Power of the TFR
+
     elif method == TFRMethod.SUPERLET:
-        frequencies = (
-            np.linspace(fmin, fmax + 1, int((fmax - fmin) / 0.25) + 1) if frequency_vector is None else frequency_vector
-        )
-        tfr = superlets(data.squeeze(), fs, frequencies, n_cycles, ord=superlet_order)
+        tfr = superlets(data, fs, frequencies, n_cycles, ord=superlet_order)
     else:
         raise ValueError("Unsupported method. Use 'morlet' or 'superlet'.")
-    tfr = tfr.squeeze()  # Remove singleton dimensions if present
 
-    # normalize as a factor of the median
     if normalization_method == "median":
         median = np.median(np.abs(tfr), axis=-1, keepdims=True)
         tfr = tfr / median
 
     elif normalization_method == "papto":
-        # Fit the aperiodic component of the power spectrum
-        fvec = np.linspace(fmin, fmax, tfr.shape[0])
-        exponent, offset = aperiodic_fit(data.squeeze(), fs=fs, **normalization_kwargs, show_fit=False)
-        nc = (fvec ** (exponent)) / (10**offset)
-        # Normalize TFR by the aperiodic fit
+        exponent, offset = aperiodic_fit(data, fs=fs, **normalization_kwargs, show_fit=False)
+        nc = (frequencies ** (exponent)) / (10**offset)
         tfr = tfr * nc[..., np.newaxis]
 
     elif normalization_method == "stppto":
-        fvec = np.linspace(fmin, fmax, tfr.shape[0])
-        # apply aperiodic fit for all single time
         foof = FOOOF(
             peak_width_limits=normalization_kwargs.get("peak_width_limits", (1, 20)),
             max_n_peaks=normalization_kwargs.get("max_n_peaks", 6),
@@ -93,10 +109,11 @@ def compute_tfr(
             aperiodic_mode=normalization_kwargs.get("mode", "knee"),
             verbose=False,
         )
-        tfr = get_rp_from_ap_fit(fvec, foof, tfr).T
+        tfr = get_rp_from_ap_fit(frequencies, foof, tfr).T
 
     elif normalization_method is not None:
         raise ValueError("Unsupported normalization method. Use None, 'median', or 'papto'.")
+
     return tfr
 
 
@@ -112,6 +129,7 @@ def get_rp_from_ap_fit(frequencies, foof, tfr):
     Returns:
     - eap: 1D array of expected aperiodic power values
     """
+
     def get_rp(frequencies, exponent, offset, tfr_tmp):
         return (frequencies**exponent) / (10**offset) * tfr_tmp
 
@@ -145,8 +163,10 @@ def amplitude_envelope(data):
     Returns:
     - envelope: 1D array of shape (n_times,), amplitude envelope of the input data
     """
-    analytic_signal = hilbert(data)
-    envelope = np.abs(analytic_signal)
+    envelope = np.zeros_like(data, dtype=float)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            envelope[i, j, :] = np.abs(hilbert(data[i, j]))
     return envelope
 
 
@@ -168,7 +188,10 @@ def bandpass_filter(data, lowcut, highcut, fs, order=5):
     low = lowcut / nyquist
     high = highcut / nyquist
     b, a = butter(order, [low, high], btype="band")
-    filtered_data = filtfilt(b, a, data)
+    filtered_data = np.copy(data)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            filtered_data[i, j, :] = filtfilt(b, a, data[i, j, :])
     return filtered_data
 
 
@@ -335,13 +358,13 @@ def bosc_bg_fit(tfr, freqs, bg_fit_method="extended"):
 def bg_fit_extended(tfr, freqs):
     log_freqs = np.log10(freqs)
     log_freqs = sm.add_constant(log_freqs)
-    dataForBG = np.log10(tfr.squeeze()).mean(-1)
+    dataForBG = np.log10(tfr).mean(-1)
     rlm_model = sm.RLM(dataForBG, log_freqs, M=sm.robust.norms.TukeyBiweight())
     rlm_results = rlm_model.fit()
     values = 10 ** rlm_results.predict(log_freqs)
     plt.figure("Linear Fit of Background Power Spectrum")
     plt.plot(freqs, values, label="Linear Fit", color="red")
-    plt.plot(freqs, np.mean(tfr.squeeze(), axis=-1), label="Mean Power Spectrum", color="blue")
+    plt.plot(freqs, np.mean(tfr, axis=-1), label="Mean Power Spectrum", color="blue")
     plt.xscale("log")
     plt.yscale("log")
     plt.xlabel("Frequency (Hz)")
@@ -352,12 +375,12 @@ def bg_fit_extended(tfr, freqs):
 
 def bg_fit_linear(tfr, freqs):
     log_freqs = np.log10(freqs)
-    log_power = np.mean(np.log10(tfr.squeeze()), axis=-1)
+    log_power = np.mean(np.log10(tfr), axis=-1)
     coefs = np.polyfit(log_freqs, log_power, 1)
     values = 10 ** np.polyval(coefs, log_freqs)
     plt.figure("Linear Fit of Background Power Spectrum")
     plt.plot(freqs, values, label="Linear Fit", color="red")
-    plt.plot(freqs, np.mean(tfr.squeeze(), axis=-1), label="Mean Power Spectrum", color="blue")
+    plt.plot(freqs, np.mean(tfr, axis=-1), label="Mean Power Spectrum", color="blue")
     plt.xscale("log")
     plt.yscale("log")
     plt.xlabel("Frequency (Hz)")
@@ -371,36 +394,99 @@ def bg_fit_foof(tfr, freqs):
         aperiodic_mode="knee",
         verbose=True,
     )
-    spectrum = np.mean(tfr.squeeze(), axis=-1)
+    spectrum = np.mean(tfr, axis=-1)
     fm.report(freqs, spectrum, plt_log=True)
     background_log = fm.get_model("aperiodic")
     return 10**background_log
 
 
 def exclude_rhythmic_peaks(freqs, tfr, peak_range, wavelet_cycles=7):
-    to_keep = np.ones(freqs.shape, dtype=bool)
-    if not isinstance(peak_range, list):
+    """
+    Exclude rhythmic peaks independently for each channel.
+
+    Parameters
+    ----------
+    freqs : ndarray, shape (n_freqs,)
+    tfr : ndarray, shape (n_epochs, n_channels, n_freqs, n_times)
+    peak_range : tuple or list of tuples
+        Frequency ranges in which to search for rhythmic peaks.
+    wavelet_cycles : float
+
+    Returns
+    -------
+    freqs_kept : list of ndarrays
+        Retained frequencies for each channel.
+    tfr_kept : list of ndarrays
+        Filtered TFR for each channel, shape (n_epochs, n_freqs_kept, n_times).
+    excluded : ndarray, shape (n_channels, n_freqs)
+        Boolean exclusion mask for each channel.
+    """
+
+    n_epochs, n_channels, n_freqs, n_times = tfr.shape
+
+    if peak_range is None or len(peak_range) == 0:
+        return (
+            [freqs.copy() for _ in range(n_channels)],
+            [tfr[:, ch, :, :] for ch in range(n_channels)],
+            np.zeros((n_channels, n_freqs), dtype=bool),
+        )
+
+    if isinstance(peak_range, tuple):
         peak_range = [peak_range]
-    tfr = tfr.squeeze()
-    if len(peak_range) == 0:
-        return freqs, tfr
-    else:
-        for freq_tmp in peak_range:
-            low, high = freq_tmp
-            # Indices within the specified exclusion range
+
+    # Average across epochs and time, separately for each channel
+    mean_bg = np.nanmean(tfr, axis=(0, 3))
+
+    # One frequency mask per channel
+    to_keep = np.ones((n_channels, n_freqs), dtype=bool)
+
+    for ch in range(n_channels):
+        for low, high in peak_range:
+
             freq_indices = np.where((freqs >= low) & (freqs <= high))[0]
+
             if len(freq_indices) == 0:
                 continue
-            # Find empirical peak within the range
-            mean_bg_within_range = tfr[freq_indices, :].mean(axis=1)
-            peak_idx = freq_indices[np.argmax(mean_bg_within_range)]
-            # Approximate wavelet extension (FWHM)
+
+            # Find empirical peak for this channel
+            peak_idx = freq_indices[np.nanargmax(mean_bg[ch, freq_indices])]
+
             peak_freq = freqs[peak_idx]
 
+            # Approximate wavelet extension
             low_freq = peak_freq - peak_freq / wavelet_cycles
             up_freq = peak_freq + peak_freq / wavelet_cycles
 
-            # Exclude expanded frequency range
-            to_keep[(freqs >= low_freq) & (freqs <= up_freq)] = False
-        excluded = ~to_keep
-    return freqs[to_keep], tfr[to_keep, :], excluded
+            to_keep[ch] &= ~((freqs >= low_freq) & (freqs <= up_freq))
+
+    excluded = ~to_keep
+
+    # Variable number of retained frequencies per channel
+    freqs_kept = [freqs[to_keep[ch]] for ch in range(n_channels)]
+
+    tfr_kept = [tfr[:, ch, to_keep[ch], :] for ch in range(n_channels)]
+
+    return freqs_kept, tfr_kept, excluded
+
+
+def check_signal_dims(signal):
+    """
+    Check the dimensions of the input signal and reshape if necessary.
+
+    Parameters:
+    -----------
+    - signal: np.ndarray
+        Input signal, can be 1D or 2D.
+
+    Returns:
+    --------
+    - reshaped_signal: np.ndarray
+        Reshaped signal as a 2D array (n_channels, n_times).
+    """
+    if np.ndim(signal) == 1:
+        signal = signal[np.newaxis, :]
+    if np.ndim(signal) == 2:
+        signal = signal[np.newaxis, :, :]
+    elif np.ndim(signal) != 3:
+        raise ValueError("Input signal must be a 1D, 2D or 3D array (n_epochs, n_channels, n_times).")
+    return signal

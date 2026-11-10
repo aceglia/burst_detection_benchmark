@@ -1,5 +1,5 @@
 from .enums import FrequencyBand, ThresholdMethod, TFRMethod
-from .process_utils import bandpass_filter, amplitude_envelope, compute_tfr
+from .process_utils import bandpass_filter, amplitude_envelope, compute_tfr, check_signal_dims
 from .burst_detection_utils import detect_bursts_tfr, detect_bursts_timeseries
 import numpy as np
 from .plot_utils import plot_bursts
@@ -39,7 +39,7 @@ class TimeDomainThresholding(Thresholding):
         Parameters:
         -----------
         signal: np.ndarray
-          1D numpy array of the raw EEG/MEG time series.
+          1D 2D or 3Dnumpy array (n_epochs, n_channels, n_times) of the raw EEG/MEG time series.
         fs: float
           Sampling frequency (Hz).
         threshold_method: ThresholdMethod
@@ -58,19 +58,20 @@ class TimeDomainThresholding(Thresholding):
         - self.amplitude_envelope: np.ndarray
             The raw amplitude envelope.
         """
+        signal = check_signal_dims(signal)
         self.is_bursts_computed = True
         self.filtered_signal = bandpass_filter(
             signal, lowcut=self.frequency_band[0], highcut=self.frequency_band[1], fs=fs, order=bp_filter_order
         )
         self.amplitude_envelope = amplitude_envelope(self.filtered_signal)
         self.fs = fs
-        median_amp = np.median(self.amplitude_envelope)
+        median_amp = np.median(self.amplitude_envelope, axis=-1, keepdims=True)
         low_thresh = low_thresh if low_thresh is not None else high_thresh
 
         high_thresh = (
             high_thresh * median_amp
             if threshold_method == ThresholdMethod.SD
-            else np.percentile(self.amplitude_envelope, high_thresh)
+            else np.percentile(self.amplitude_envelope, high_thresh, axis=-1, keepdims=True)
         )
         low_thresh = low_thresh * median_amp if threshold_method == ThresholdMethod.SD else high_thresh
         self.threshold = (low_thresh, high_thresh)
@@ -80,7 +81,7 @@ class TimeDomainThresholding(Thresholding):
     def get_bursts(self):
         return self.bursts
 
-    def plot_bursts(self, range=None, show=True):
+    def plot_bursts(self, data_range=None, show=True):
         if not self.is_bursts_computed:
             raise RuntimeError("Bursts have not been computed yet. Call detect_beta_bursts() first.")
 
@@ -88,10 +89,10 @@ class TimeDomainThresholding(Thresholding):
             signal=self.filtered_signal,
             bursts=self.bursts,
             fs=self.fs,
-            time=np.arange(len(self.filtered_signal)) / self.fs,
+            time=np.arange(self.filtered_signal.shape[-1]) / self.fs,
             frequency_vector=np.linspace(self.frequency_band[0], self.frequency_band[1], 1),
             envelope=self.amplitude_envelope,
-            range=range,
+            data_range=data_range,
             tfr_plot=False,
             show=show,
         )
@@ -146,6 +147,7 @@ class FrequencyDomainThresholding(Thresholding):
             The input spectrum.
         """
         self.fs = fs
+        signal = check_signal_dims(signal)
         self.signal = signal
         self.filtered_signal = bandpass_filter(
             signal, lowcut=self.frequency_band[0], highcut=self.frequency_band[1], fs=fs, order=bp_filter_order
@@ -187,18 +189,18 @@ class FrequencyDomainThresholding(Thresholding):
         )
         return self.tfr
 
-    def plot_bursts(self, range=None, show=True, colorbar=False):
+    def plot_bursts(self, data_range=None, show=True, colorbar=False):
         if self.tfr is None:
             raise RuntimeError("Bursts have not been computed yet. Call detect_bursts() first.")
         return plot_bursts(
             signal=self.filtered_signal,
             bursts=self.bursts,
             fs=self.fs,
-            time=np.arange(len(self.filtered_signal)) / self.fs,
+            time=np.arange(self.filtered_signal.shape[-1]) / self.fs,
             frequency_vector=self.frequency_vector,
             tfr=self.tfr,
             tfr_plot=True,
-            range=range,
+            data_range=data_range,
             show=show,
             colorbar=colorbar,
         )

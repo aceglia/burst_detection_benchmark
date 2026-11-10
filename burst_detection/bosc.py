@@ -1,5 +1,5 @@
 from .enums import FrequencyBand, BoscType, TFRMethod
-from .process_utils import compute_tfr, bandpass_filter, bosc_bg_fit, exclude_rhythmic_peaks
+from .process_utils import compute_tfr, bandpass_filter, bosc_bg_fit, exclude_rhythmic_peaks, check_signal_dims
 from .plot_utils import plot_bursts
 import numpy as np
 from .burst_detection_utils import bosc_burst_det
@@ -56,7 +56,7 @@ class Bosc:
         freq_to_exclude=(),
         **normalization_kwargs,
     ) -> np.ndarray:
-
+        signal = check_signal_dims(signal)
         if not isinstance(min_duration, int) or min_duration <= 0:
             raise ValueError("min_duration must be a positive integer representing the number of cycles.")
 
@@ -95,7 +95,9 @@ class Bosc:
         )
         excluded = np.zeros_like(self.frequency_vector, dtype=bool)
         if len(freq_to_exclude) > 0 and self.bosc_type == BoscType.EXTENDED:
-            freqs, tfr, excluded = exclude_rhythmic_peaks(self.frequency_vector, self.tfr, freq_to_exclude, wavelet_cycles=n_cycles)
+            # freqs, tfr, excluded = exclude_rhythmic_peaks(self.frequency_vector, self.tfr, freq_to_exclude, wavelet_cycles=n_cycles)
+            print("NOT IMPLEMENTED: Excluding frequency ranges is not yet implemented for EXTENDED BoscType.")
+            freqs, tfr = self.frequency_vector, self.tfr
         elif len(freq_to_exclude) > 0 and self.bosc_type != BoscType.EXTENDED:
             print(
                 "WARNING: You specified frequency range to exclude but didn't choose the EXTENDED bosc type. It will be ignored."
@@ -103,7 +105,8 @@ class Bosc:
             freqs, tfr = self.frequency_vector, self.tfr
         else:
             freqs, tfr = self.frequency_vector, self.tfr
-        background_power = bosc_bg_fit(tfr, freqs, self.bosc_type.value)
+
+        background_power = bosc_bg_fit(tfr.transpose(2, 3, 0, 1).reshape(tfr.shape[2], -1), freqs, self.bosc_type.value)
         common_idx = (self.frequency_vector >= self.frequency_band[0]) & (
             self.frequency_vector <= self.frequency_band[-1]
         )
@@ -121,18 +124,18 @@ class Bosc:
         self.is_bursts_computed = True
         return self.tfr
 
-    def plot_bursts(self, range=None, show=True, colorbar=False):
+    def plot_bursts(self, data_range=None, show=True, colorbar=False):
         if self.tfr is None:
             raise RuntimeError("Bursts have not been computed yet. Call detect_bursts() first.")
         return plot_bursts(
             signal=self.filtered_signal,
             bursts=self.bursts,
             fs=self.fs,
-            time=np.arange(len(self.filtered_signal)) / self.fs,
+            time=np.arange(self.filtered_signal.shape[-1]) / self.fs,
             frequency_vector=self.frequency_vector,
             tfr=self.tfr,
             tfr_plot=True,
-            range=range,
+            data_range=data_range,
             show=show,
             colorbar=colorbar,
         )

@@ -1,10 +1,8 @@
-from .process_utils import calculate_fwhm, aperiodic_fit, bosc_bg_fit
+from .process_utils import calculate_fwhm
 import numpy as np
 from .burst import Burst
 from skimage.morphology import h_maxima
 from scipy.stats import chi2
-from scipy.ndimage import label
-import statsmodels as sm
 
 
 def detect_bursts_tfr(
@@ -35,114 +33,127 @@ def detect_bursts_tfr(
     burst_list : list of burst class
         List of detected bursts, each represented as a burst class
     """
+    bursts = {}
+    for i in range(tfr.shape[0]):
+        bursts[i] = {}
+        for j in range(tfr.shape[1]):
+            bursts[i][j] = []
+            tfr_1d = tfr[i, j]
+            minimum_prominence = prominence_factor * np.max(tfr_1d)
+            mask_h = h_maxima(tfr_1d, h=minimum_prominence)
+            peakf, peakt = np.where(mask_h.squeeze())
 
-    tfr = np.asarray(tfr).squeeze()
-    minimum_prominence = prominence_factor * np.max(tfr)
-    mask_h = h_maxima(tfr, h=minimum_prominence)
-    peakf, peakt = np.where(mask_h.squeeze())
+            power = tfr_1d[peakf, peakt]
 
-    power = tfr[peakf, peakt]
-
-    freqs = np.asarray(freqs).squeeze() if freqs is not None else np.arange(tfr.shape[0])
-    bursts = []
-    for f, t, p in zip(peakf, peakt, power):
-        if threshold is not None and p < threshold:
-            continue
-        lowerf, upperf, widthf = calculate_fwhm(tfr[:, t], f, freqs)
-        lowert, uppert, widtht = calculate_fwhm(tfr[f, :], t, np.arange(tfr.shape[1]))
-        lowert = lowert / fs
-        uppert = uppert / fs
-        widtht = widtht / fs
-        if (
-            widthf <= min_frequency_width
-            or widtht <= min_duration
-            or widthf <= min_frequency_width
-            or widtht <= min_duration
-        ):
-            continue
-        bursts.append(
-            Burst(
-                low_freq=lowerf,
-                high_freq=upperf,
-                start_time=lowert,
-                end_time=uppert,
-                freq_width=widthf,
-                duration=widtht,
-                peak_freq=freqs[f],
-                peak_time=t / fs,
-                peak_amplitude=p,
-            )
-        )
+            freqs = np.asarray(freqs).squeeze() if freqs is not None else np.arange(tfr_1d.shape[0])
+            for f, t, p in zip(peakf, peakt, power):
+                if threshold is not None and p < threshold:
+                    continue
+                lowerf, upperf, widthf = calculate_fwhm(tfr_1d[:, t], f, freqs)
+                lowert, uppert, widtht = calculate_fwhm(tfr_1d[f, :], t, np.arange(tfr_1d.shape[1]))
+                lowert = lowert / fs
+                uppert = uppert / fs
+                widtht = widtht / fs
+                if (
+                    widthf <= min_frequency_width
+                    or widtht <= min_duration
+                    or widthf <= min_frequency_width
+                    or widtht <= min_duration
+                ):
+                    continue
+                bursts[i][j].append(
+                    Burst(
+                        low_freq=lowerf,
+                        high_freq=upperf,
+                        start_time=lowert,
+                        end_time=uppert,
+                        peak_freq=freqs[f],
+                        peak_time=t / fs,
+                        peak_amplitude=p,
+                    )
+                )
     return bursts
 
 
 def detect_bursts_timeseries(signal, fs, high_thresh, low_thresh, min_duration):
     # Find the start and end indices of bursts based on the high and low thresholds
-    start_idxs = np.flatnonzero((signal[1:] >= high_thresh) & (signal[:-1] < high_thresh)) + 1
-    end_idxs = np.flatnonzero((signal[1:] < low_thresh) & (signal[:-1] >= low_thresh)) + 1
+    # signal shape: (n_epochs, n_channels, n_samples)
 
-    if signal[0] >= high_thresh and 0 not in start_idxs:
-        start_idxs = np.insert(start_idxs, 0, 0)
+    starts = (signal[..., 1:] >= high_thresh) & (signal[..., :-1] < high_thresh)
+    ends = (signal[..., 1:] < low_thresh) & (signal[..., :-1] >= low_thresh)
 
-    if signal[-1] >= low_thresh and len(signal) - 1 not in end_idxs:
-        end_idxs = np.append(end_idxs, len(signal) - 1)
+    # Add transitions at the first and last samples
+    starts = np.concatenate([
+        (signal[..., :1] >= high_thresh),
+        starts
+    ], axis=-1)
 
-    # Ensure that each start index has a corresponding end index
-    end_positions = np.searchsorted(end_idxs, start_idxs, side="right")
-    _, idx = np.unique(end_positions, return_index=True)
-    keep = np.zeros(len(end_positions), dtype=bool)
-    keep[idx] = True
+    ends = np.concatenate([
+        ends,
+        (signal[..., -1:] >= low_thresh)
+    ], axis=-1)
 
-    # Remove duplicate end positions
-    valid = keep & (end_positions < len(end_idxs))
-    end_idxs = end_idxs[end_positions[valid]]
-    start_idxs = start_idxs[valid]
+    # Extract indices along the last axis
+    start_idxs = np.where(starts)
+    end_idxs = np.where(ends)
+    bursts = {}
+    for i in range(signal.shape[0]):
+        bursts[i] = {}
+        for j in range(signal.shape[1]):
+            bursts[i][j] = []
+            signal_1d = signal[i, j, :]
+            starts_1d = start_idxs[-1][(start_idxs[0] == i) & (start_idxs[1] == j)]
+            ends_1d = end_idxs[-1][(end_idxs[0] == i) & (end_idxs[1] == j)]
+            low_thresh_1d = low_thresh[i, j]
+            # Ensure that each start index has a corresponding end index
+            end_positions = np.searchsorted(ends_1d, starts_1d, side="right")
+            _, idx = np.unique(end_positions, return_index=True)
+            keep = np.zeros(len(end_positions), dtype=bool)
+            keep[idx] = True
 
-    # backfill start indices with the last index where the signal was below the low threshold
-    idxs_under = np.flatnonzero(signal < low_thresh)
-    if len(idxs_under):
-        previous_under = np.maximum.accumulate(np.where(signal < low_thresh, np.arange(len(signal)), -1))
-        start_idxs = np.where(
-            previous_under[start_idxs] >= 0,
-            previous_under[start_idxs] + 1,
-            start_idxs,
-        )
+            # Remove duplicate end positions
+            valid = keep & (end_positions < len(ends_1d))
+            ends_1d = ends_1d[end_positions[valid]]
+            starts_1d = starts_1d[valid]
 
-    # interpaolate the start and end indices to get a more accurate estimate of the time of the burst
-    # Interpolate burst start (crossing low_thresh upwards)
-    start_idxs_float = (
-        start_idxs - 1 + (low_thresh - signal[start_idxs - 1]) / (signal[start_idxs] - signal[start_idxs - 1])
-    )
+            # backfill start indices with the last index where the signal was below the low threshold
+            idxs_under = np.flatnonzero(signal_1d < low_thresh_1d)
+            if len(idxs_under):
+                previous_under = np.maximum.accumulate(np.where(signal_1d < low_thresh_1d, np.arange(len(signal_1d)), -1))
+                starts_1d = np.where(
+                    previous_under[starts_1d] >= 0,
+                    previous_under[starts_1d] + 1,
+                    starts_1d,
+                )
 
-    # Interpolate burst end (crossing low_thresh downwards)
-    end_idxs_float = end_idxs - 1 + (low_thresh - signal[end_idxs - 1]) / (signal[end_idxs] - signal[end_idxs - 1])
-    start_times = start_idxs_float / fs
-    end_times = end_idxs_float / fs
-    duration_sec = end_times - start_times
+            # interpaolate the start and end indices to get a more accurate estimate of the time of the burst
+            # Interpolate burst start (crossing low_thresh upwards)
+            start_1d_float = (
+                starts_1d - 1 + (low_thresh_1d - signal_1d[starts_1d - 1]) / (signal_1d[starts_1d] - signal_1d[starts_1d - 1])
+            )
 
-    # compute the duration of each burst in seconds and filter out bursts that are shorter than the minimum duration
-    valid = duration_sec >= min_duration
-    start_idxs = start_idxs[valid]
-    end_idxs = end_idxs[valid]
-    start_times = start_times[valid]
-    end_times = end_times[valid]
-    duration_sec = duration_sec[valid]
-    time_vector = np.arange(len(signal)) / fs
+            # Interpolate burst end (crossing low_thresh downwards)
+            end_1d_float = ends_1d - 1 + (low_thresh_1d - signal_1d[ends_1d - 1]) / (signal_1d[ends_1d] - signal_1d[ends_1d - 1])
+            start_times = start_1d_float / fs
+            end_times = end_1d_float / fs
+            duration_sec = end_times - start_times
 
-    # Fill in the burst list with the detected bursts
-    bursts = [
-        Burst(
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            peak_freq=None,
-            peak_time=time_vector[signal == np.max(signal[start_idx:end_idx])],
-            peak_amplitude=np.max(signal[start_idx:end_idx]),
-        )
-        for start_idx, end_idx, start_time, end_time, duration in zip(
-            start_idxs, end_idxs, start_times, end_times, duration_sec
-        )
-    ]
+            # compute the duration of each burst in seconds and filter out bursts that are shorter than the minimum duration
+            valid = duration_sec >= min_duration
+            starts_1d = starts_1d[valid]
+            ends_1d = ends_1d[valid]
+            start_times = start_times[valid]
+            end_times = end_times[valid]
+            duration_sec = duration_sec[valid]
+            time_vector = np.arange(len(signal_1d)) / fs
+
+            # Fill in the burst list with the detected bursts
+            bursts[i][j] = [Burst(
+                    start_time=start_time,
+                    end_time=end_time,
+                    peak_time=time_vector[signal_1d == np.max(signal_1d[start_idx:end_idx])],
+                    peak_amplitude=np.max(signal_1d[start_idx:end_idx]),
+                ) for start_idx, end_idx, start_time, end_time in zip(starts_1d, ends_1d, start_times, end_times)]
     return bursts
 
 
@@ -155,29 +166,68 @@ def bosc_burst_det(tfr, freqs, fs, power_threshold=95, n_cycles=3, background_po
     significant_power = tfr > power_threshold[None, None, :, None]
     duration_threshold = np.ceil(n_cycles * fs / freqs).astype(int)
     padded = np.pad(significant_power.astype(int), ((0, 0), (0, 0), (0, 0), (1, 1)), mode="constant", constant_values=0)
-    padded = padded.squeeze()
-    tfr = tfr.squeeze()
-    bursts = []
-    for f, freq in enumerate(freqs):
-        minimum_duration = duration_threshold[f]
-        x = significant_power[0, 0, f, :].astype(int)
-        padded = np.pad(x, (1, 1), constant_values=0)
-        dx = np.diff(padded)
-        pos = np.where(dx == 1)[0]  # starts, 0-based
-        neg = np.where(dx == -1)[0] # ends, exclusive
-        for start, end in zip(pos, neg):
-            episode_span = end - start - 1
-            if episode_span >= minimum_duration:        
-                peak_amplitude = np.max(tfr[f, start:end])
-                peak_time = np.argmax(tfr[f, start:end]) + start
-                bursts.append(
-                    Burst(
-                        start_time=start / fs,
-                        end_time=end / fs,
-                        duration=episode_span / fs,
-                        peak_freq=freq,
-                        peak_time=peak_time / fs,
-                        peak_amplitude=peak_amplitude,
-                    )
-                )
+    bursts = {}
+    for i in range(tfr.shape[0]):
+        bursts[i] = {}
+        for j in range(tfr.shape[1]):
+            bursts[i][j] = []
+            for f, freq in enumerate(freqs):
+                minimum_duration = duration_threshold[f]
+                x = significant_power[i, j, f, :].astype(int)
+                padded = np.pad(x, (1, 1), constant_values=0)
+                dx = np.diff(padded)
+                pos = np.where(dx == 1)[0]  # starts, 0-based
+                neg = np.where(dx == -1)[0]  # ends, exclusive
+                for start, end in zip(pos, neg):
+                    episode_span = end - start - 1
+                    if episode_span >= minimum_duration:
+                        peak_amplitude = np.max(tfr[i, j, f, start:end])
+                        peak_time = np.argmax(tfr[i, j, f, start:end]) + start
+                        bursts[i][j].append(
+                            Burst(
+                                start_time=start / fs,
+                                end_time=end / fs,
+                                peak_freq=freq,
+                                peak_time=peak_time / fs,
+                                peak_amplitude=peak_amplitude,
+                            )
+                        )
+    return bursts
+
+def freq_span_computation(tfr, time_span, fs, freqs, bursts):
+    """
+    Compute the frequency span of each burst based on the TFR and the time span.
+
+    Parameters
+    ----------
+    tfr : ndarray
+        Complex TFR, shape (frequencies, times),
+        or power TFR with the same shape.
+    time_span : tuple
+        Tuple containing the start and end times of the burst (in seconds).
+    fs : float
+        Sampling frequency of the signal (Hz).
+    freqs : ndarray
+        Frequencies corresponding to the TFR, shape (frequencies,).
+    bursts : list of Burst
+        List of detected bursts.
+
+    Returns
+    -------
+    bursts : list of Burst
+        List of detected bursts with updated frequency spans.
+    """
+    for burst in bursts:
+        start_idx = int(burst.start_time * fs)
+        end_idx = int(burst.end_time * fs)
+        tfr_segment = tfr[:, start_idx:end_idx]
+        threshold = tfr[:, start_idx] + 2 * tfr[:, start_idx:end_idx].std()
+        freq_indices = np.where(tfr_segment > 0)[0]
+        if len(freq_indices) > 0:
+            burst.low_freq = freqs[freq_indices[0]]
+            burst.high_freq = freqs[freq_indices[-1]]
+        else:
+            burst.low_freq = None
+            burst.high_freq = None
+
     return bursts
